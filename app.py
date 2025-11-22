@@ -138,6 +138,28 @@ model = load_model(selected_model_path)
 # Navigation
 page = st.sidebar.radio("Go to", ["Dashboard Overview", "Machine Details", "Model Performance", "About"])
 
+# ===========================
+# NEW SECTION: SIDEBAR EXTRAS
+# ===========================
+st.sidebar.markdown("---") 
+
+# 1. Add relevant image
+try:
+    st.sidebar.image("image_865b20.png", caption="Smart Factory Monitoring", use_container_width=True)
+except FileNotFoundError:
+    st.sidebar.info("Company Logo / Plant Image")
+
+# 2. Add quick dataset statistics
+if not df.empty:
+    st.sidebar.markdown("### 📊 Quick Stats")
+    col_s1, col_s2 = st.sidebar.columns(2)
+    with col_s1:
+        st.metric("Machines", len(df))
+    with col_s2:
+        st.metric("Failures", df['Machine failure'].sum())
+    
+    st.sidebar.caption(f"Data Source: AI4I 2020 Dataset")
+
 # -----------------------------------------------------------------------------
 # 5. GLOBAL PREDICTIONS & LOGIC
 # -----------------------------------------------------------------------------
@@ -285,14 +307,13 @@ if page == "Dashboard Overview":
         st.plotly_chart(fig_imp, use_container_width=True)
     else:
         # SVM / MLP: Show Correlation Heatmap
-        # FIX: Prepare numeric dataframe for correlation
         df_corr = df.copy()
         
-        # Ensure Type is numeric for correlation if it's one of the features
+        # Ensure Type is numeric for correlation
         if 'Type' in df_corr.columns and df_corr['Type'].dtype == 'object':
              df_corr['Type'] = df_corr['Type'].map({'H': 0, 'L': 1, 'M': 2})
         
-        # Filter columns present in the feature set + Failure
+        # Filter columns
         corr_cols = [c for c in feature_names if c in df_corr.columns]
         
         if corr_cols:
