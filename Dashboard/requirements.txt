@@ -1,0 +1,13 @@
+treamlit
+
+
+pandas
+
+
+numpy
+
+
+scikit-learn
+
+
+plotly
