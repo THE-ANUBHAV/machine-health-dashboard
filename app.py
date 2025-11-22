@@ -149,10 +149,8 @@ if model is not None and not df.empty:
     current_acc = accuracy_score(y_true, (probs > 0.5).astype(int))
     baseline_acc = 1 - y_true.mean() # Accuracy if we always predicted "Safe"
 
-    # 5c. Sidebar: Model Comparison Chart (Replaces Image)
+    # 5c. Sidebar: Model Benchmark
     st.sidebar.markdown("### 🆚 Model Benchmark")
-    
-    # Simple bar chart comparing Current Model vs Baseline
     fig_bench = go.Figure()
     fig_bench.add_trace(go.Bar(
         x=['Baseline', 'Current Model'],
@@ -161,20 +159,17 @@ if model is not None and not df.empty:
         textposition='auto',
         marker_color=['#9E9E9E', '#4CAF50']
     ))
-    
     fig_bench.update_layout(
         title="Accuracy vs Baseline",
         title_font_size=14,
         margin=dict(l=10, r=10, t=30, b=10),
         height=200,
-        yaxis=dict(showgrid=False, range=[0.9, 1.01]) # Zoom in to show difference
+        yaxis=dict(showgrid=False, range=[0.9, 1.01])
     )
     st.sidebar.plotly_chart(fig_bench, use_container_width=True)
-    
-    # Dataset Stats
     st.sidebar.caption(f"Machines: {len(df)} | Failures: {y_true.sum()}")
 
-    # 5d. Apply Predictions to DataFrame
+    # 5d. Apply Predictions
     df['Failure Probability'] = probs
     df['Risk Category'] = df['Failure Probability'].apply(
         lambda p: 'High' if p > 0.7 else ('Medium' if p > 0.4 else 'Low')
@@ -216,7 +211,7 @@ if page == "Dashboard Overview":
     else:
         st.success("✅ No High Risk Machines Detected")
 
-    # Main Table & Plots
+    # Main Prediction Table & Risk Dist
     col_main, col_plot = st.columns([2, 1])
     with col_main:
         st.subheader("Live Predictions")
@@ -232,6 +227,35 @@ if page == "Dashboard Overview":
         st.subheader("Risk Distribution")
         fig_hist = px.histogram(df, x="Failure Probability", nbins=20, color_discrete_sequence=['#636EFA'])
         st.plotly_chart(fig_hist, use_container_width=True)
+
+    # --- RESTORED VISUALIZATIONS SECTION ---
+    st.divider()
+    st.subheader("📊 Historical Analysis & Features")
+    col_v1, col_v2 = st.columns(2)
+    
+    with col_v1:
+        st.markdown("**Failure Cause Breakdown**")
+        # Check if failure type columns exist
+        fail_cols = ['TWF', 'HDF', 'PWF', 'OSF', 'RNF']
+        if all(c in df.columns for c in fail_cols):
+            fail_counts = df[fail_cols].sum().reset_index()
+            fail_counts.columns = ['Cause', 'Count']
+            fig_pie = px.pie(fail_counts, values='Count', names='Cause', hole=0.4, color_discrete_sequence=px.colors.sequential.RdBu)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.info("Failure Type columns (TWF, HDF, etc.) not found in dataset.")
+
+    with col_v2:
+        st.markdown("**Feature Correlation Heatmap**")
+        # Prepare numeric data for correlation
+        corr_df = df[feature_names].copy()
+        # Ensure Type is numeric
+        if 'Type' in corr_df.columns and corr_df['Type'].dtype == 'object':
+            corr_df['Type'] = corr_df['Type'].map({'H': 0, 'L': 1, 'M': 2})
+        
+        corr = corr_df.corr()
+        fig_corr = px.imshow(corr, text_auto=True, color_continuous_scale='Viridis', aspect="auto")
+        st.plotly_chart(fig_corr, use_container_width=True)
 
 elif page == "Machine Details":
     st.title("🔎 Diagnostics")
@@ -271,12 +295,19 @@ elif page == "Model Performance":
     with col_cm:
         st.subheader("Confusion Matrix")
         cm = confusion_matrix(y_true, y_pred)
-        st.plotly_chart(px.imshow(cm, text_auto=True, color_continuous_scale='Blues'), use_container_width=True)
+        # Improved Heatmap for Confusion Matrix
+        fig_cm = px.imshow(cm, text_auto=True, 
+                           labels=dict(x="Predicted", y="Actual"),
+                           x=['Normal', 'Failure'], y=['Normal', 'Failure'],
+                           color_continuous_scale='Blues')
+        fig_cm.update_layout(title_text="Confusion Matrix", title_x=0.5)
+        st.plotly_chart(fig_cm, use_container_width=True)
     
     with col_roc:
         st.subheader("ROC Curve")
         fpr, tpr, _ = roc_curve(y_true, df['Failure Probability'])
-        fig_roc = px.area(x=fpr, y=tpr, title=f"AUC: {auc(fpr, tpr):.4f}")
+        fig_roc = px.area(x=fpr, y=tpr, title=f"AUC: {auc(fpr, tpr):.4f}",
+                          labels=dict(x='False Positive Rate', y='True Positive Rate'))
         fig_roc.add_shape(type='line', line=dict(dash='dash'), x0=0, x1=1, y0=0, y1=1)
         st.plotly_chart(fig_roc, use_container_width=True)
 
