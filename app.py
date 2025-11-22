@@ -18,7 +18,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for styling status cards and alerts
+# Custom CSS
 st.markdown("""
 <style>
     .metric-card {
@@ -28,9 +28,6 @@ st.markdown("""
         text-align: center;
         box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
     }
-    .high-risk { color: #ff4b4b; font-weight: bold; }
-    .med-risk { color: #ffa500; font-weight: bold; }
-    .low-risk { color: #09ab3b; font-weight: bold; }
     .stAlert { border-radius: 10px; }
 </style>
 """, unsafe_allow_html=True)
@@ -40,17 +37,15 @@ st.markdown("""
 # -----------------------------------------------------------------------------
 @st.cache_data
 def load_data():
-    """Loads the AI4I 2020 dataset."""
     try:
         df = pd.read_csv("ai4i2020.csv")
         return df
     except FileNotFoundError:
-        st.error("File 'ai4i2020.csv' not found. Please ensure it is in the same directory.")
+        st.error("File 'ai4i2020.csv' not found.")
         return pd.DataFrame()
 
 @st.cache_resource
 def load_model(model_path):
-    """Loads a pickled model."""
     try:
         with open(model_path, 'rb') as file:
             model = pickle.load(file)
@@ -61,58 +56,39 @@ def load_model(model_path):
         st.error(f"Error loading {model_path}: {e}")
         return None
 
-# Load Dataset
 df = load_data()
 
 # -----------------------------------------------------------------------------
-# 3. PREPROCESSING (UPDATED FOR 6 vs 10 FEATURES)
+# 3. PREPROCESSING
 # -----------------------------------------------------------------------------
 def preprocess_input(df_input):
-    """
-    Preprocesses data to match training formats.
-    Returns dictionaries of feature sets and scalers.
-    """
     data = df_input.copy()
-    
-    # 1. Encode Type (Standard LabelEncoder: H=0, L=1, M=2)
     type_map = {'H': 0, 'L': 1, 'M': 2}
     if data['Type'].dtype == 'object':
         data['Type'] = data['Type'].map(type_map)
     
-    # Define Feature Sets
-    # Set A: Standard 6 features
     cols_6 = ['Type', 'Air temperature [K]', 'Process temperature [K]', 
               'Rotational speed [rpm]', 'Torque [Nm]', 'Tool wear [min]']
     
-    # Set B: 10 features (Likely 5 sensors + 5 failure flags, Type dropped)
-    # This addresses the SVM/MLP 10 feature requirement
     cols_10 = ['Air temperature [K]', 'Process temperature [K]', 
                'Rotational speed [rpm]', 'Torque [Nm]', 'Tool wear [min]',
                'TWF', 'HDF', 'PWF', 'OSF', 'RNF']
     
-    # Prepare X matrices
     X_6 = data[cols_6]
-    
-    # Check if failure cols exist for 10-feature set
-    if all(col in data.columns for col in cols_10):
-        X_10 = data[cols_10]
-    else:
-        # Fallback if dataset lacks failure columns (unlikely given csv)
-        X_10 = pd.DataFrame()
+    X_10 = data[cols_10] if all(c in data.columns for c in cols_10) else pd.DataFrame()
 
-    # Fit Scalers (Crucial for SVM/MLP)
-    scaler_6 = StandardScaler()
-    X_6_scaled = scaler_6.fit_transform(X_6)
+    # Fallback Scalers
+    scaler_6 = StandardScaler().fit(X_6)
+    X_6_scaled = scaler_6.transform(X_6)
     
-    scaler_10 = StandardScaler()
-    X_10_scaled = scaler_10.fit_transform(X_10) if not X_10.empty else None
+    X_10_scaled = None
+    if not X_10.empty:
+        scaler_10 = StandardScaler().fit(X_10)
+        X_10_scaled = scaler_10.transform(X_10)
     
     return {
-        "X_6_raw": X_6,
-        "X_6_scaled": X_6_scaled,
-        "X_10_scaled": X_10_scaled,
-        "names_6": cols_6,
-        "names_10": cols_10
+        "X_6_raw": X_6, "X_6_scaled": X_6_scaled,
+        "X_10_scaled": X_10_scaled, "names_6": cols_6, "names_10": cols_10
     }
 
 if not df.empty:
@@ -120,317 +96,190 @@ if not df.empty:
     y_true = df['Machine failure']
 
 # -----------------------------------------------------------------------------
-# 4. SIDEBAR
+# 4. SIDEBAR CONTROLS
 # -----------------------------------------------------------------------------
 st.sidebar.title("⚙️ Dashboard Controls")
 
-# Model Selector
 model_options = {
     "Random Forest": "random_forest.pkl",
     "Gradient Boosting": "gradient_boosting.pkl",
     "Support Vector Machine": "svm.pkl",
     "MLP Neural Network": "mlp.pkl"
 }
-selected_model_name = st.sidebar.selectbox("Select Prediction Model", list(model_options.keys()))
+selected_model_name = st.sidebar.selectbox("Select Model", list(model_options.keys()))
 selected_model_path = model_options[selected_model_name]
 model = load_model(selected_model_path)
 
-# Navigation
 page = st.sidebar.radio("Go to", ["Dashboard Overview", "Machine Details", "Model Performance", "About"])
 
-# ===========================
-# NEW SECTION: SIDEBAR EXTRAS
-# ===========================
-st.sidebar.markdown("---") 
-
-# 1. Add relevant image
-try:
-    st.sidebar.image("image_865b20.png", caption="Smart Factory Monitoring", use_container_width=True)
-except FileNotFoundError:
-    st.sidebar.info("Company Logo / Plant Image")
-
-# 2. Add quick dataset statistics
-if not df.empty:
-    st.sidebar.markdown("### 📊 Quick Stats")
-    col_s1, col_s2 = st.sidebar.columns(2)
-    with col_s1:
-        st.metric("Machines", len(df))
-    with col_s2:
-        st.metric("Failures", df['Machine failure'].sum())
-    
-    st.sidebar.caption(f"Data Source: AI4I 2020 Dataset")
+st.sidebar.markdown("---")
 
 # -----------------------------------------------------------------------------
-# 5. GLOBAL PREDICTIONS & LOGIC
+# 5. GLOBAL PREDICTIONS & SIDEBAR VISUALIZATION
 # -----------------------------------------------------------------------------
-# Initialize variables to avoid scope issues
 probs = np.zeros(len(df)) if not df.empty else []
 feature_names = []
 
 if model is not None and not df.empty:
-    # Detect required features
+    # 5a. Generate Predictions
     n_features = getattr(model, "n_features_in_", 6)
-    
     X_input = None
     
-    # Logic to select correct input shape
     if n_features == 10:
         X_input = preprocessed["X_10_scaled"]
         feature_names = preprocessed["names_10"]
-        st.sidebar.success(f"Loaded {selected_model_name} (10 features detected)")
     else:
-        # For Trees (Raw) vs SVM/MLP (Scaled) on 6 features
         feature_names = preprocessed["names_6"]
         if "SVM" in selected_model_name or "MLP" in selected_model_name:
             X_input = preprocessed["X_6_scaled"]
         else:
             X_input = preprocessed["X_6_raw"]
-        st.sidebar.success(f"Loaded {selected_model_name} (6 features detected)")
 
     if X_input is not None:
         try:
             if hasattr(model, "predict_proba"):
                 probs = model.predict_proba(X_input)[:, 1]
             else:
-                # Fallback for SVM if probability=False
                 pred_class = model.predict(X_input)
-                probs = pred_class.astype(float) # Convert 0/1 to float for compatibility
-        except Exception as e:
-            st.error(f"Prediction failed: {e}")
+                probs = pred_class.astype(float)
+        except Exception:
             probs = np.zeros(len(df))
 
-    # Assign Risk Categories
+    # 5b. Calculate Stats for Sidebar Visualization
+    current_acc = accuracy_score(y_true, (probs > 0.5).astype(int))
+    baseline_acc = 1 - y_true.mean() # Accuracy if we always predicted "Safe"
+
+    # 5c. Sidebar: Model Comparison Chart (Replaces Image)
+    st.sidebar.markdown("### 🆚 Model Benchmark")
+    
+    # Simple bar chart comparing Current Model vs Baseline
+    fig_bench = go.Figure()
+    fig_bench.add_trace(go.Bar(
+        x=['Baseline', 'Current Model'],
+        y=[baseline_acc, current_acc],
+        text=[f"{baseline_acc:.1%}", f"{current_acc:.1%}"],
+        textposition='auto',
+        marker_color=['#9E9E9E', '#4CAF50']
+    ))
+    
+    fig_bench.update_layout(
+        title="Accuracy vs Baseline",
+        title_font_size=14,
+        margin=dict(l=10, r=10, t=30, b=10),
+        height=200,
+        yaxis=dict(showgrid=False, range=[0.9, 1.01]) # Zoom in to show difference
+    )
+    st.sidebar.plotly_chart(fig_bench, use_container_width=True)
+    
+    # Dataset Stats
+    st.sidebar.caption(f"Machines: {len(df)} | Failures: {y_true.sum()}")
+
+    # 5d. Apply Predictions to DataFrame
     df['Failure Probability'] = probs
     df['Risk Category'] = df['Failure Probability'].apply(
         lambda p: 'High' if p > 0.7 else ('Medium' if p > 0.4 else 'Low')
     )
-
-    # RUL Heuristic
-    df['Predicted RUL (min)'] = 250 - df['Tool wear [min]']
-    df['Predicted RUL (min)'] = df['Predicted RUL (min)'].clip(lower=0) 
-
-    # Maintenance Recommendation
-    def recommend_maint(row):
-        if row['Risk Category'] == 'High': return "🔴 Replace Tool / Inspect Immediately"
-        elif row['Risk Category'] == 'Medium': return "🟡 Scheduled Inspection"
-        else: return "🟢 Normal Operation"
-    
-    df['Recommendation'] = df.apply(recommend_maint, axis=1)
+    df['Predicted RUL (min)'] = (250 - df['Tool wear [min]']).clip(lower=0)
+    df['Recommendation'] = df['Risk Category'].map({
+        'High': "🔴 Replace Tool / Inspect",
+        'Medium': "🟡 Scheduled Inspection",
+        'Low': "🟢 Normal Operation"
+    })
 
 # -----------------------------------------------------------------------------
-# 6. PAGE: DASHBOARD OVERVIEW
+# 6. DASHBOARD PAGES
 # -----------------------------------------------------------------------------
 if page == "Dashboard Overview":
-    # --- Header ---
+    # Header
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.title("Machine Health Monitoring & Failure Prediction")
-        st.markdown(f"**Model Version:** v1.0 ({selected_model_name}) | **Status:** Online")
+        st.title("Machine Health Monitoring")
+        st.markdown(f"**Model:** {selected_model_name} | **Status:** Online")
     with col2:
-        st.markdown(f"**Last Refresh:** {datetime.now().strftime('%H:%M:%S')}")
-        health_score = 100 - (df['Risk Category'] == 'High').mean() * 100
-        st.metric("Overall Plant Health", f"{health_score:.1f}%")
-
+        st.metric("Plant Health", f"{100 - (df['Risk Category']=='High').mean()*100:.1f}%")
+    
     st.divider()
 
-    # --- Top Summary Cards ---
-    total_machines = len(df)
-    high_risk_count = len(df[df['Risk Category'] == 'High'])
-    med_risk_count = len(df[df['Risk Category'] == 'Medium'])
-    safe_count = len(df[df['Risk Category'] == 'Low'])
-    failures_logged = df['Machine failure'].sum()
-    avg_tool_wear = df['Tool wear [min]'].mean()
+    # KPI Cards
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Machines", len(df))
+    c2.metric("High Risk", len(df[df['Risk Category']=='High']), delta_color="inverse")
+    c3.metric("Medium Risk", len(df[df['Risk Category']=='Medium']))
+    c4.metric("Avg Tool Wear", f"{df['Tool wear [min]'].mean():.1f} min")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("🏭 Total Machines", total_machines)
-    c2.metric("🔴 High Risk", high_risk_count, delta=f"{high_risk_count/total_machines:.1%}")
-    c3.metric("🟡 Medium Risk", med_risk_count)
-    c4.metric("✅ Safe Machines", safe_count)
-    c5.metric("⚙️ Avg Tool Wear", f"{avg_tool_wear:.1f} min")
-
-    # --- Alerts Panel ---
-    if high_risk_count > 0:
-        st.subheader("🔔 Active Alerts (High Risk Detected)")
-        high_risk_df = df[df['Risk Category'] == 'High'].head(3) 
-        for idx, row in high_risk_df.iterrows():
-            st.error(f"⚠️ **Machine {row['UDI']}**: High Failure Probability ({row['Failure Probability']:.1%}). Torque: {row['Torque [Nm]']} Nm. Recommendation: {row['Recommendation']}")
+    # Alerts
+    high_risk_df = df[df['Risk Category'] == 'High']
+    if not high_risk_df.empty:
+        st.subheader("🔔 Priority Alerts")
+        for _, row in high_risk_df.head(3).iterrows():
+            st.error(f"**UDI {row['UDI']}**: Risk {row['Failure Probability']:.1%} | Torque: {row['Torque [Nm]']} | {row['Recommendation']}")
     else:
-        st.success("No High Risk Machines Detected.")
+        st.success("✅ No High Risk Machines Detected")
 
-    # --- Main Layout: Table & Distribution ---
-    col_main, col_charts = st.columns([2, 1])
-
+    # Main Table & Plots
+    col_main, col_plot = st.columns([2, 1])
     with col_main:
-        st.subheader("📋 Machine-Level Prediction Table")
-        display_cols = ['UDI', 'Type', 'Torque [Nm]', 'Tool wear [min]', 'Air temperature [K]', 
-                        'Failure Probability', 'Risk Category', 'Predicted RUL (min)', 'Recommendation']
-        
+        st.subheader("Live Predictions")
         st.dataframe(
-            df[display_cols].sort_values(by='Failure Probability', ascending=False),
-            column_config={
-                "Failure Probability": st.column_config.ProgressColumn(
-                    "Failure Prob", format="%.2f", min_value=0, max_value=1,
-                ),
-            },
+            df[['UDI', 'Type', 'Torque [Nm]', 'Tool wear [min]', 'Failure Probability', 'Risk Category', 'Recommendation']]
+            .sort_values('Failure Probability', ascending=False),
+            column_config={"Failure Probability": st.column_config.ProgressColumn(format="%.2f")},
             height=400,
             use_container_width=True
         )
-
-    with col_charts:
-        st.subheader("📊 Failure Prediction Distribution")
-        fig_hist = px.histogram(df, x="Failure Probability", nbins=20, 
-                                title="Distribution of Risk Scores",
-                                color_discrete_sequence=['#636EFA'])
+    
+    with col_plot:
+        st.subheader("Risk Distribution")
+        fig_hist = px.histogram(df, x="Failure Probability", nbins=20, color_discrete_sequence=['#636EFA'])
         st.plotly_chart(fig_hist, use_container_width=True)
-        
-        st.markdown("**Historical Failure Causes**")
-        failure_cols = ['TWF', 'HDF', 'PWF', 'OSF', 'RNF']
-        failure_counts = df[failure_cols].sum().reset_index()
-        failure_counts.columns = ['Cause', 'Count']
-        
-        fig_pie = px.pie(failure_counts, values='Count', names='Cause', hole=0.4,
-                         color_discrete_sequence=px.colors.sequential.RdBu)
-        st.plotly_chart(fig_pie, use_container_width=True)
 
-    # --- Feature Importance / Correlation ---
-    st.subheader("🔍 Model Feature Importance / Correlation")
-    if hasattr(model, 'feature_importances_'):
-        # Tree Models
-        feat_names_display = feature_names if len(feature_names) == len(model.feature_importances_) else [f"Feat {i}" for i in range(len(model.feature_importances_))]
-        feat_imp = pd.DataFrame({
-            'Feature': feat_names_display,
-            'Importance': model.feature_importances_
-        }).sort_values(by='Importance', ascending=True)
-        
-        fig_imp = px.bar(feat_imp, x='Importance', y='Feature', orientation='h', 
-                         title=f"Feature Importance ({selected_model_name})")
-        st.plotly_chart(fig_imp, use_container_width=True)
-    else:
-        # SVM / MLP: Show Correlation Heatmap
-        df_corr = df.copy()
-        
-        # Ensure Type is numeric for correlation
-        if 'Type' in df_corr.columns and df_corr['Type'].dtype == 'object':
-             df_corr['Type'] = df_corr['Type'].map({'H': 0, 'L': 1, 'M': 2})
-        
-        # Filter columns
-        corr_cols = [c for c in feature_names if c in df_corr.columns]
-        
-        if corr_cols:
-            corr = df_corr[corr_cols].corr()
-            fig_corr = px.imshow(corr, text_auto=True, aspect="auto", color_continuous_scale='Viridis', title="Feature Correlation Matrix")
-            st.plotly_chart(fig_corr, use_container_width=True)
-        else:
-            st.warning("Could not calculate correlation: Feature names do not match DataFrame columns.")
-
-
-# -----------------------------------------------------------------------------
-# 7. PAGE: MACHINE DETAILS
-# -----------------------------------------------------------------------------
 elif page == "Machine Details":
-    st.title("🔎 Machine Details & Diagnostics")
-    selected_udi = st.selectbox("Select Machine ID (UDI)", df['UDI'].unique())
-    m_data = df[df['UDI'] == selected_udi].iloc[0]
+    st.title("🔎 Diagnostics")
+    sel_udi = st.selectbox("Select UDI", df['UDI'].unique())
+    row = df[df['UDI'] == sel_udi].iloc[0]
     
-    col_h1, col_h2, col_h3 = st.columns(3)
-    with col_h1: st.metric("Machine ID", m_data['UDI'])
-    with col_h2: 
-        color = "red" if m_data['Risk Category'] == 'High' else "orange" if m_data['Risk Category'] == 'Medium' else "green"
-        st.markdown(f"### Risk Status: :{color}[{m_data['Risk Category']}]")
-    with col_h3: st.metric("Failure Probability", f"{m_data['Failure Probability']:.2%}")
-
-    st.divider()
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.info(f"**Type:** {m_data['Type']}")
-    c2.info(f"**Air Temp:** {m_data['Air temperature [K]']} K")
-    c3.info(f"**Process Temp:** {m_data['Process temperature [K]']} K")
-    c4.info(f"**Rot Speed:** {m_data['Rotational speed [rpm]']} rpm")
-
-    st.subheader(f"📈 Sensor Trends: Machine {selected_udi}")
-    col_trend1, col_trend2 = st.columns(2)
-
-    def generate_history(current_val, variability=0.05, steps=20):
-        history = [current_val * (1 + np.random.uniform(-variability, variability)) for _ in range(steps)]
-        history[-1] = current_val 
-        return history
-
-    with col_trend1:
-        torque_hist = generate_history(m_data['Torque [Nm]'])
-        fig_torque = px.line(y=torque_hist, x=list(range(20)), title="Torque [Nm] - Last 20 Cycles")
-        fig_torque.add_hline(y=60, line_dash="dash", line_color="red")
-        st.plotly_chart(fig_torque, use_container_width=True)
-
-    with col_trend2:
-        wear_hist = generate_history(m_data['Tool wear [min]'])
-        fig_wear = px.line(y=wear_hist, x=list(range(20)), title="Tool Wear [min] - Growth")
-        fig_wear.add_hline(y=200, line_dash="dash", line_color="red")
-        st.plotly_chart(fig_wear, use_container_width=True)
-
-    st.subheader("🛠️ Maintenance Scheduler")
-    days_left = int(m_data['Predicted RUL (min)'] / 60 / 8)
-    if days_left < 1: days_left = 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Risk Level", row['Risk Category'])
+    c2.metric("Failure Prob", f"{row['Failure Probability']:.2%}")
+    c3.metric("RUL", f"{row['Predicted RUL (min)']} min")
     
-    sched_col1, sched_col2, sched_col3 = st.columns(3)
-    sched_col1.metric("Est. RUL (Minutes)", f"{m_data['Predicted RUL (min)']:.0f} min")
-    sched_col2.metric("Est. Days to Failure", f"{days_left} days")
-    sched_col3.metric("Estimated Cost Savings", f"${m_data['Failure Probability'] * 5000:.0f}")
+    # Simulated Trends
+    st.subheader("Sensor Trends (Last 20 Cycles)")
+    col_t1, col_t2 = st.columns(2)
+    
+    hist_torque = [row['Torque [Nm]'] * (1 + np.random.normal(0, 0.05)) for _ in range(20)]
+    fig_t = px.line(y=hist_torque, title="Torque History")
+    fig_t.add_hline(y=60, line_dash="dash", line_color="red")
+    col_t1.plotly_chart(fig_t, use_container_width=True)
+    
+    hist_wear = [row['Tool wear [min]'] * (1 + np.random.normal(0, 0.02)) for _ in range(20)]
+    fig_w = px.line(y=hist_wear, title="Tool Wear History")
+    fig_w.add_hline(y=200, line_dash="dash", line_color="red")
+    col_t2.plotly_chart(fig_w, use_container_width=True)
 
-    if m_data['Risk Category'] == 'High':
-        st.warning(f"**Action Required:** {m_data['Recommendation']}")
-        st.button("📅 Schedule Maintenance Request", type="primary")
-
-# -----------------------------------------------------------------------------
-# 8. PAGE: MODEL PERFORMANCE
-# -----------------------------------------------------------------------------
 elif page == "Model Performance":
-    st.title("🧪 Model Performance Metrics")
-    st.markdown(f"Evaluation based on the full **AI4I 2020** dataset using **{selected_model_name}**.")
-
+    st.title("Model Evaluation")
     y_pred = (df['Failure Probability'] > 0.5).astype(int)
-    acc = accuracy_score(y_true, y_pred)
-    prec = precision_score(y_true, y_pred)
-    rec = recall_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred)
-
+    
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Accuracy", f"{acc:.4f}")
-    m2.metric("Precision", f"{prec:.4f}")
-    m3.metric("Recall", f"{rec:.4f}")
-    m4.metric("F1 Score", f"{f1:.4f}")
-
-    col_perf1, col_perf2 = st.columns(2)
-    with col_perf1:
+    m1.metric("Accuracy", f"{accuracy_score(y_true, y_pred):.4f}")
+    m2.metric("Precision", f"{precision_score(y_true, y_pred):.4f}")
+    m3.metric("Recall", f"{recall_score(y_true, y_pred):.4f}")
+    m4.metric("F1 Score", f"{f1_score(y_true, y_pred):.4f}")
+    
+    col_cm, col_roc = st.columns(2)
+    with col_cm:
         st.subheader("Confusion Matrix")
         cm = confusion_matrix(y_true, y_pred)
-        fig_cm = px.imshow(cm, text_auto=True, 
-                           labels=dict(x="Predicted", y="Actual"),
-                           x=['Normal', 'Failure'], y=['Normal', 'Failure'],
-                           color_continuous_scale='Blues')
-        st.plotly_chart(fig_cm, use_container_width=True)
-
-    with col_perf2:
+        st.plotly_chart(px.imshow(cm, text_auto=True, color_continuous_scale='Blues'), use_container_width=True)
+    
+    with col_roc:
         st.subheader("ROC Curve")
         fpr, tpr, _ = roc_curve(y_true, df['Failure Probability'])
-        roc_auc = auc(fpr, tpr)
-        fig_roc = px.area(x=fpr, y=tpr, title=f'ROC Curve (AUC = {roc_auc:.4f})')
+        fig_roc = px.area(x=fpr, y=tpr, title=f"AUC: {auc(fpr, tpr):.4f}")
         fig_roc.add_shape(type='line', line=dict(dash='dash'), x0=0, x1=1, y0=0, y1=1)
         st.plotly_chart(fig_roc, use_container_width=True)
 
-# -----------------------------------------------------------------------------
-# 9. PAGE: ABOUT
-# -----------------------------------------------------------------------------
 elif page == "About":
-    st.title("ℹ️ About This Dashboard")
-    st.markdown("""
-    ### Dataset: AI4I 2020 Predictive Maintenance Dataset
-    **Features Used:**
-    * **Type:** Quality variant (Low/Medium/High)
-    * **Air Temperature [K]:** Room temperature.
-    * **Process Temperature [K]:** Generated by the process.
-    * **Rotational Speed [rpm]:** Calculated from power.
-    * **Torque [Nm]:** Torque values normally distributed.
-    * **Tool Wear [min]:** Usage time of the cutting tool.
-    
-    *Note: Some models (SVM/MLP) may use failure flags as input features based on training configuration.*
-    """)
+    st.title("ℹ️ Project Info")
+    st.markdown("Predictive maintenance dashboard using AI4I 2020 dataset. Models: RF, GB, SVM, MLP.")
