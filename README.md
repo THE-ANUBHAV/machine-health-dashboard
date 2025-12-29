@@ -52,3 +52,6 @@ Run the application:
 Bash
 
 streamlit run app.py
+
+🔗Live App -----
+https://machine-health-dashboard.streamlit.app/
